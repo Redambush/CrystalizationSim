@@ -10,9 +10,9 @@
 
 // The names of the variables, whether they are scalars or vectors and whether the
 // governing eqn for the variable is parabolic or elliptic
-#define variable_name {"c", "n"}
-#define variable_type {"SCALAR","SCALAR"}
-#define variable_eq_type {"PARABOLIC","PARABOLIC"}
+#define variable_name {"phi", "T"}
+#define variable_type {"SCALAR", "SCALAR"}
+#define variable_eq_type {"PARABOLIC", "PARABOLIC"}
 
 // Flags for whether the value, gradient, and Hessian are needed in the residual eqns
 #define need_val {true, true}
@@ -32,138 +32,47 @@
 // here. For more complex cases with loops or conditional statements, residual
 // equations (or parts of residual equations) can be written below in "residualRHS".
 
-//define Cahn-Hilliard parameters (No Gradient energy term)
-#define alpha 400
-#define epsilon 0.0025
-#define delta 0.5
-#define m 0.05
+// Material parameters (ice-water)
+#define T_M 273.15
+#define L 3.34e5
+#define Cp 4.2e3
+#define D 1.3e-7
+#define W 1e-7
+#define tau 1e-4
+#define lambda 10.0
+#define epsilon_a 0.02
 
-//anisotropy and regularization parameters
-#define epsilonM 0.05
-#define coeff (epsilon*alpha*delta)
+// Hexagonal anisotropy (6-fold)
+#define a_theta (1.0 + epsilon_a * cos(6.0 * theta))
 
-//anisotropy gamma as a function of the components of the normal vector
-//current anisotropy has 4-fold or octahedral symmetry
-#if problemDIM==1
-#define gamma 1.0
-#elif problemDIM==2
-//writing out powers instead of using std::pow(double,double) for performance reasons
-#define gamma (1.0+epsilonM*(4.0*(normal[0]*normal[0]*normal[0]*normal[0]+normal[1]*normal[1]*normal[1]*normal[1])-3.0))
-#else
-#define gamma (1.0+epsilonM*(4.0*(normal[0]*normal[0]*normal[0]*normal[0]+normal[1]*normal[1]*normal[1]*normal[1]+normal[2]*normal[2]*normal[2]*normal[2])-3.0))
-#endif
-
-//derivatives of gamma with respect to the components of the unit normal
-#define gammanx (epsilonM*16.0*normal[0]*normal[0]*normal[0])
-#define gammany (epsilonM*16.0*normal[1]*normal[1]*normal[1])
-#define gammanz (epsilonM*16.0*normal[2]*normal[2]*normal[2])
-
-#if problemDIM==2
-#define gammax (gammanx*normalx[0][0]+gammany*normalx[0][1])
-#define gammay (gammanx*normalx[1][0]+gammany*normalx[1][1])
-#define gammaz (gammanx*normalx[2][0]+gammany*normalx[2][1])
-
-#elif problemDIM==3
-#define gammax (gammanx*normalx[0][0]+gammany*normalx[0][1]+gammanz*normalx[0][2])
-#define gammay (gammanx*normalx[1][0]+gammany*normalx[1][1]+gammanz*normalx[1][2])
-#define gammaz (gammanx*normalx[2][0]+gammany*normalx[2][1]+gammanz*normalx[2][2])
-#endif
-
-#define gammanxx (epsilonM*48.0*normal[0]*normal[0]*normalx[0][0])
-#define gammanyy (epsilonM*48.0*normal[1]*normal[1]*normalx[1][1])
-#define gammanzz (epsilonM*48.0*normal[2]*normal[2]*normalx[2][2])
-
-//Allen-Cahn mobility (isotropic)
-#define tau1 (epsilon*epsilon/m)
-#define tau2 (epsilon*epsilon)
-
-//Allen-Cahn mobility (anisotropic)
-//#define MnV (1.0/(gamma*gamma+1e-10))
-#define An (n*(1.0-n)*(n-0.5+30.0*coeff*c*n*(1.0-n)))
-#define Bn ((n-oldn)*30.0*n*n*(1.0-n)*(1.0-n))
-//define required residuals (aniso defined in model)
-
-#define rcV   (c-constV(1.0/delta)*Bn)
-#define rcxV  (constV(-timeStep)*cx)
-#define rnV  (n+constV(timeStep/tau1)*(constV(tau2)*aniso+An))
-#define rnxV (constV(tau2*timeStep/tau1)*(-gamma*gamma*nx))
-
-
-// =================================================================================
-// residualRHS
-// =================================================================================
-// This function calculates the residual equations for each variable. It takes
-// "modelVariablesList" as an input, which is a list of the value and derivatives of
-// each of the variables at a specific quadrature point. The (x,y,z) location of
-// that quadrature point is given by "q_point_loc". The function outputs
-// "modelResidualsList", a list of the value and gradient terms of the residual for
-// each residual equation. The index for each variable in these lists corresponds to
-// the order it is defined at the top of this file (starting at 0).template <int dim>
+// Residuals
 template <int dim>
 void generalizedProblem<dim>::residualRHS(const std::vector<std::vector<modelVariable<dim>>*> & modelVariablesList, 
      std::vector<modelResidual<dim>> & modelResidualsList, 
-					  dealii::Point<dim, dealii::VectorizedArray<double> > q_point_loc) const {
+     dealii::Point<dim, dealii::VectorizedArray<double> > q_point_loc) const {
 
-//c
- scalarvalueType c = (*modelVariablesList[0])[0].scalarValue;
+  // phi
+  scalarvalueType phi = (*modelVariablesList[0])[0].scalarValue;
+  scalargradType phix = (*modelVariablesList[0])[0].scalarGrad;
+  // T
+  scalarvalueType T = (*modelVariablesList[0])[1].scalarValue;
+  scalargradType Tx = (*modelVariablesList[0])[1].scalarGrad;
 
- scalargradType cx = (*modelVariablesList[0])[0].scalarGrad;
- 
-//n
- scalarvalueType n = (*modelVariablesList[0])[1].scalarValue;
- scalarvalueType oldn = (*modelVariablesList[1])[1].scalarValue;
- scalargradType nx = (*modelVariablesList[0])[1].scalarGrad;
- scalarhessType nxx = (*modelVariablesList[0])[1].scalarHess;
+  // Compute theta from gradient (for anisotropy)
+  double theta = atan2(phix[1], phix[0]); // 2D; for 3D, use spherical coordinates
 
-// anisotropy code
- scalarvalueType normgradn = std::sqrt(nx.norm_square());
- scalargradType normal = nx/(normgradn+constV(1.0e-16));
- scalarhessType normalx = nxx/(normgradn+constV(1.0e-16));
- scalarvalueType gamma_scl = gamma;
- scalarvalueType aniso = constV(0.0);
+  // Anisotropy
+  double a = a_theta;
+  double a2 = a * a;
 
-#if problemDIM>1
- scalargradType dgammadnorm;
- dgammadnorm[0]=gammanx;
- dgammadnorm[1]=gammany;
- 
- scalargradType dgammadnormdx;
- dgammadnormdx[0] = gammanxx;
- dgammadnormdx[1] = gammanyy;
+  // Phase-field equation (Allen-Cahn/Karma)
+  double u = (T - T_M) / 1.0; // scale denominator as needed
+  double phase_rhs = (phi - phi*phi)*(phi - 0.5 + lambda*u);
+  modelResidualsList[0].scalarValueResidual = (phi - old_phi)/tau - W*W*div(a2*grad(phi)) - phase_rhs;
 
- scalargradType gammax_scl;
- gammax_scl[0] = gammax;
- gammax_scl[1] = gammay;
-
-#if problemDIM>2
- dgammadnorm[2]=gammanz;
- dgammadnormdx[2] = gammanzz;
- gammax_scl[2] = gammaz;
-#endif
-      for (unsigned int i=0; i<problemDIM; ++i){
-	aniso += normgradn*(gammax_scl[i]*dgammadnorm[i]
-			    +gamma_scl*dgammadnormdx[i]);
-	/*	
-	if (n[0]>0.1 && n[0]<0.9)
-	  std::cout << "aniso: " << aniso[0] << std::endl
-		    << "normxx: "<< normalx[0][0][0] << std::endl
-		    << "normyy: "<< normalx[1][1][0] << std::endl
-		    << "normzz: "<< normalx[2][2][0] << std::endl
-		    << "normgrad: "<< normgradn[0] << std::endl
-		    << "gammax: " << gammax_scl[i][0] << std::endl
-		    << "dgammadnorm: " << dgammadnorm[i][0] << std::endl
-		    << "gamma: " << gamma_scl[0] << std::endl
-		    << "dgammadnormdx: " << dgammadnormdx[i][0] <<std::endl;
-	*/
-      }
-#endif
-// end anisotropy code
-
-modelResidualsList[0].scalarValueResidual = rcV;
-modelResidualsList[0].scalarGradResidual = rcxV;
-
-modelResidualsList[1].scalarValueResidual = rnV;
-modelResidualsList[1].scalarGradResidual = rnxV;
+  // Heat equation with latent heat
+  double latent = (L/Cp) * (phi - old_phi)/tau;
+  modelResidualsList[1].scalarValueResidual = (T - old_T)/tau - D*laplacian(T) - latent;
 }
 
 // =================================================================================
